@@ -1,84 +1,132 @@
+import pandas as pd
 import numpy as np
-from scipy.stats import norm
+import scipy.stats as stats
+from statsmodels.stats.power import TTestIndPower
 
 
-def calculate_proportion_sample_size(p_A=0.09, p_B=0.07, alpha=0.05, power=0.8, kappa=1.0):
+def analyze_arpu_ab_test(file_path):
     """
-    计算比例类AB测试的最小样本量（基于比例类公式）
+    分析两组ARPU数据的AB测试结果
 
     参数:
-        p_A: 实验组比例（默认9%）
-        p_B: 对照组比例（默认7%）
-        alpha: 显著性水平（默认0.05）
-        power: 统计功效（默认0.8）
-        kappa: 样本比例 n_A/n_B（默认1.0，即1:1分配）
+        file_path: Excel文件路径
 
     返回:
-        n_B: B组（对照组）所需最小样本量
-        n_A: A组（实验组）所需最小样本量
-        total: 总样本量
+        包含所有统计结果的字典
     """
-    # 计算效应值（绝对提升）
-    effect_size = abs(p_A - p_B)
+    # 1. 读取Excel数据
+    df = pd.read_excel(file_path)
 
-    # 计算Z值
-    z_alpha = norm.ppf(1 - alpha / 2)  # 双侧检验
-    z_beta = norm.ppf(power)  # 统计功效
+    # 2. 预处理数据 - 删除汇总行和空行
+    # 根据原始数据格式，有效数据行中"初始事件发生时间"列不为空
+    df = df[df['初始事件发生时间'].notna()]
 
-    # 计算联合方差项
-    variance_component = (
-            p_A * (1 - p_A) / kappa +
-            p_B * (1 - p_B)
+    # 3. 将ARPU列转换为数值类型
+    df['ARPU'] = pd.to_numeric(df['ARPU'], errors='coerce')
+
+    # 4. 分组数据
+    group1 = df[df['app版本'] == '1.2.7']['ARPU'].dropna()
+    group2 = df[df['app版本'] == '1.2.6']['ARPU'].dropna()
+
+    # 5. 描述性统计分析
+    n1, n2 = len(group1), len(group2)
+    mean1, mean2 = np.mean(group1), np.mean(group2)
+    std1, std2 = np.std(group1, ddof=1), np.std(group2, ddof=1)
+
+    # 6. 独立样本t检验（假设方差齐性）
+    t_stat, p_value = stats.ttest_ind(group1, group2, equal_var=True)
+
+    # 7. 计算置信区间
+    diff_mean = mean1 - mean2
+    pooled_std = np.sqrt(((n1 - 1) * std1 ** 2 + (n2 - 1) * std2 ** 2) / (n1 + n2 - 2))
+    se_diff = pooled_std * np.sqrt(1 / n1 + 1 / n2)
+    ci_low = diff_mean - stats.t.ppf(0.975, n1 + n2 - 2) * se_diff
+    ci_high = diff_mean + stats.t.ppf(0.975, n1 + n2 - 2) * se_diff
+
+    # 8. 计算统计功效
+    effect_size = np.abs(diff_mean) / pooled_std
+    power_analysis = TTestIndPower()
+    power = power_analysis.solve_power(
+        effect_size=effect_size,
+        nobs1=n1,
+        alpha=0.05,
+        ratio=n2 / n1
     )
 
-    # 计算B组样本量
-    n_B = variance_component * ((z_alpha + z_beta) / effect_size) ** 2
+    # 9. 结果解释
+    if p_value < 0.05:
+        conclusion = f"拒绝原假设：版本 {group1.name if mean1 > mean2 else group2.name} 的ARPU显著较高"
+    else:
+        conclusion = "无法拒绝原假设：两组ARPU无显著差异"
 
-    # 计算A组样本量
-    n_A = kappa * n_B
-
-    # 向上取整
-    n_B = int(np.ceil(n_B))
-    n_A = int(np.ceil(n_A))
-    total = n_A + n_B
-
+    # 10. 汇总结果
     return {
-        '对照组比例': p_B,
-        '实验组比例': p_A,
-        '绝对提升': effect_size,
-        '相对提升': (p_A - p_B) / p_B * 100,
-        'B组样本量(n_B)': n_B,
-        'A组样本量(n_A)': n_A,
-        '总样本量': total,
-        '统计功效': power,
-        '显著性水平': alpha,
-        '样本比例(κ)': kappa,
-        'Z_alpha': z_alpha,
-        'Z_beta': z_beta
+        "Group1": {
+            "name": "1.2.7",
+            "sample_size": n1,
+            "mean": mean1,
+            "std": std1
+        },
+        "Group2": {
+            "name": "1.2.6",
+            "sample_size": n2,
+            "mean": mean2,
+            "std": std2
+        },
+        "t_statistic": t_stat,
+        "p_value": p_value,
+        "mean_difference": diff_mean,
+        "effect_size": effect_size,
+        "confidence_interval": (ci_low, ci_high),
+        "statistical_power": power,
+        "conclusion": conclusion
     }
 
 
-# 示例：默认情况（7%提升到9%）
-default_result = calculate_proportion_sample_size()
-print("\n【默认比例测试（7%→9%）】")
-for key, value in default_result.items():
-    if key in ['B组样本量(n_B)', 'A组样本量(n_A)', '总样本量']:
-        print(f"{key}: {value}")
-    elif key not in ['Z_alpha', 'Z_beta']:
-        print(f"{key}: {value:.4f}")
+def main():
+    # 文件路径 - 请替换为您的实际文件路径
+    file_path = "yy_data.xlsx"
 
-# 不同场景对比
-print("\n\n【不同场景样本量对比】")
+    # 执行分析
+    results = analyze_arpu_ab_test(file_path)
 
-# 场景1：更小的提升（7%→7.5%）
-small_effect = calculate_proportion_sample_size(p_A=0.075, p_B=0.07)
-print(f"\n7%→7.5%（小效果提升）：需总样本量 {small_effect['总样本量']}人")
+    # 打印结果
+    print("=" * 60)
+    print("AB测试结果 - ARPU分析")
+    print("=" * 60)
 
-# 场景2：更大的提升（7%→11%）
-large_effect = calculate_proportion_sample_size(p_A=0.11, p_B=0.07)
-print(f"7%→11%（大效果提升）：需总样本量 {large_effect['总样本量']}人")
+    # 打印描述性统计
+    print(f"\n【描述性统计】")
+    print(f"版本 {results['Group1']['name']} (N={results['Group1']['sample_size']}):")
+    print(f"  均值 = {results['Group1']['mean']:.4f}, 标准差 = {results['Group1']['std']:.4f}")
+    print(f"版本 {results['Group2']['name']} (N={results['Group2']['sample_size']}):")
+    print(f"  均值 = {results['Group2']['mean']:.4f}, 标准差 = {results['Group2']['std']:.4f}")
 
-# 场景3：不同样本比例（2:1分配）
-kappa_effect = calculate_proportion_sample_size(kappa=2.0)
-print(
-    f"7%→9%（2:1分配）：需总样本量 {kappa_effect['总样本量']}人（A组:B组={kappa_effect['A组样本量(n_A)']}:{kappa_effect['B组样本量(n_B)']}）")
+    # 打印假设检验结果
+    print(f"\n【假设检验】")
+    print(f"t统计量 = {results['t_statistic']:.4f}")
+    print(f"p值 = {results['p_value']:.6f}")
+    if results['p_value'] < 0.05:
+        print(f"结果在α=0.05水平显著 ({'*' * 10}显著{'*' * 10})")
+    else:
+        print(f"结果不显著 (p > 0.05)")
+
+    # 打印效应量和置信区间
+    print(f"\n【效应量与置信区间】")
+    print(f"均值差异 = {results['mean_difference']:.4f}")
+    print(f"效应量(Cohen's d) = {results['effect_size']:.4f}")
+    print(f"95%置信区间: [{results['confidence_interval'][0]:.4f}, {results['confidence_interval'][1]:.4f}]")
+
+    # 打印统计功效
+    print(f"\n【统计功效】")
+    print(f"统计功效 = {results['statistical_power']:.4f}")
+    if results['statistical_power'] < 0.8:
+        print("注意: 统计功效 < 0.8，检测差异的能力较低，建议增加样本量")
+
+    # 打印结论
+    print(f"\n【结论】")
+    print(results['conclusion'])
+
+
+if __name__ == "__main__":
+    main()
